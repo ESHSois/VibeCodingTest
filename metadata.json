@@ -1,0 +1,6 @@
+{
+  "name": "Power Gate Shooter",
+  "description": "ゲートを通過して弾や能力を増やし、強化しながら強力な敵やボスを倒していくスクロールシューティングゲーム",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
