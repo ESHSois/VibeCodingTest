@@ -88,6 +88,7 @@ export default function GameCanvas({
   const bossActive = useRef<boolean>(false);
   const bossDefeatedSequence = useRef<boolean>(false);
   const bossAlertTimer = useRef<number>(0); // Siren alert flash
+  const bossInvincibleTimer = useRef<number>(0); // Invincibility timer for boss (10 seconds)
   
   // Scoring / Gold Session records
   const sessionScore = useRef<number>(0);
@@ -158,6 +159,7 @@ export default function GameCanvas({
     bossActive.current = false;
     bossDefeatedSequence.current = false;
     bossAlertTimer.current = 0;
+    bossInvincibleTimer.current = 0;
     
     playerXInGame.current = GAME_WIDTH / 2;
     playerYInGame.current = GAME_HEIGHT * 0.8;
@@ -180,7 +182,12 @@ export default function GameCanvas({
 
   // Utility to generate unique gate options based on player stats and stage scaling
   const generateGateOptions = (stage: number): { left: GateOption; right: GateOption } => {
-    const gateTypes: GateType[] = ['DAMAGE', 'FIRERATE', 'BULLETCOUNT', 'PIERCE', 'BULLETSPEED', 'BULLETSIZE', 'HOMING', 'SHIELD'];
+    let gateTypes: GateType[] = ['DAMAGE', 'FIRERATE', 'BULLETCOUNT', 'PIERCE', 'BULLETSPEED', 'HOMING', 'SHIELD'];
+    
+    // Filter out BULLETCOUNT if player already has 4 or more bullets
+    if (playerStats.bulletCount >= 4) {
+      gateTypes = gateTypes.filter(t => t !== 'BULLETCOUNT');
+    }
     
     // Pick two distinct types
     let leftType = gateTypes[Math.floor(Math.random() * gateTypes.length)];
@@ -244,7 +251,7 @@ export default function GameCanvas({
   };
 
   // Handle Boss Defeated Reward selection
-  const handleSelectReward = (rewardType: 'hp_increase' | 'shield' | 'damage') => {
+  const handleSelectReward = (rewardType: 'hp_increase' | 'shield' | 'damage' | 'hp_heal_50') => {
     audio.playStageCleared();
 
     // 1. Apply selected reward
@@ -278,6 +285,18 @@ export default function GameCanvas({
         damage: prev.damage + dmgInc
       }));
       addFloatingText(playerXInGame.current, playerYInGame.current - 45, `💥弾ダメージ＋${dmgInc}!`, '#f59e0b');
+    } else if (rewardType === 'hp_heal_50') {
+      // Restores 50% of max HP
+      setPlayerStats(prev => {
+        const healAmount = Math.round(prev.maxHp * 0.5);
+        const newHp = Math.min(prev.maxHp, prev.hp + healAmount);
+        playerHp.current = newHp;
+        return {
+          ...prev,
+          hp: newHp
+        };
+      });
+      addFloatingText(playerXInGame.current, playerYInGame.current - 45, "❤️HP回復＋50%!", '#10b981');
     }
 
     // 2. Perform next stage progression and save state
@@ -350,7 +369,7 @@ export default function GameCanvas({
           updated.fireRate = Math.min(20, parseFloat((updated.fireRate * (1 + option.value)).toFixed(2)));
           break;
         case 'BULLETCOUNT':
-          updated.bulletCount = Math.min(8, updated.bulletCount + option.value);
+          updated.bulletCount = Math.min(4, updated.bulletCount + option.value);
           break;
         case 'PIERCE':
           updated.bulletPierce += option.value;
@@ -403,8 +422,13 @@ export default function GameCanvas({
     const progressFactor = 1 + (stageProgress.current / 30); // scales up to +333% at 100% progress
     const stageFactor = 1 + (stage - 1) * 0.75; // Stage level scaling (Stage 1 is baseline, Stage 2 has +75% HP scale, Stage 3 has +150%)
     
-    // 敵のHPをプレイヤーの現在の攻撃力の10倍に変更（敵テンプレートやステージ数、進行度に応じて調整可能にする場合は template.hpMultiplier も掛け合わせる）
-    const baseHp = playerStats.damage * 10 * template.hpMultiplier;
+    // 5ステージ（Wave）クリアごとに、敵のHPを10%アップ
+    const clears = stage - 1;
+    const fiveWaveCycles = Math.floor(clears / 5);
+    const hpBonusFactor = 1 + (fiveWaveCycles * 0.10);
+    
+    // 敵のHPをプレイヤーの現在の攻撃力の150倍を参照して調整（敵テンプレートや5ステージごとのHPアップボーナスを掛け合わせる）
+    const baseHp = playerStats.damage * 150 * template.hpMultiplier * hpBonusFactor;
     const finalHp = Math.max(1, Math.round(baseHp));
 
     // All enemy starting horizontal velocity is 0 to move perfectly straight down
@@ -608,8 +632,13 @@ export default function GameCanvas({
     setTimeout(() => {
       if (gameState !== 'PLAYING') return;
       bossActive.current = true;
+      bossInvincibleTimer.current = 10.0; // 10 seconds invincibility
       
-      const bossHp = 250 * Math.pow(1.6, stage - 1);
+      const clears = stage - 1;
+      const fiveWaveCycles = Math.floor(clears / 5);
+      const hpBonusFactor = 1 + (fiveWaveCycles * 0.10);
+      const bossHp = 250 * Math.pow(1.6, stage - 1) * hpBonusFactor;
+      
       enemies.current.push({
         id: 'BOSS_ID',
         x: GAME_WIDTH / 2,
@@ -673,6 +702,10 @@ export default function GameCanvas({
     // 1. Invincibility timer
     if (invincibilityTimer.current > 0) {
       invincibilityTimer.current -= dt;
+    }
+
+    if (bossInvincibleTimer.current > 0) {
+      bossInvincibleTimer.current = Math.max(0, bossInvincibleTimer.current - dt);
     }
 
     // 2. Alert screenshake decays
@@ -1187,9 +1220,13 @@ export default function GameCanvas({
     // 15. Periodic Random Spawners
     // Adjust spawn frequency depending on progress and stages
     if (!bossSpawned.current && !bossActive.current && !bossDefeatedSequence.current) {
-      // Capped at maximum 3 enemies between gates for a smoother game flow
+      // 5ステージ（Wave）クリアごとに、最大同時出現数が＋1
+      const clears = playerStats.stage - 1;
+      const fiveWaveCycles = Math.floor(clears / 5);
+      const maxEnemies = 3 + fiveWaveCycles;
+      
       const spawnChance = 0.009 + (playerStats.stage * 0.0015);
-      if (Math.random() < spawnChance && enemies.current.length < 3) {
+      if (Math.random() < spawnChance && enemies.current.length < maxEnemies) {
         spawnEnemy(playerStats.stage);
       }
 
@@ -1262,23 +1299,33 @@ export default function GameCanvas({
         if (distance < bullet.size + enemy.size) {
           // Bullet contact!
           if (bullet.pierceRemaining >= 0) {
-            enemy.hp -= bullet.damage;
-            bullet.pierceRemaining--;
+            if (enemy.isBoss && bossInvincibleTimer.current > 0) {
+              // Boss is invincible! Play custom electric blue shield sparks
+              bullet.pierceRemaining--;
+              addExplosion(bullet.x, bullet.y, '#38bdf8', 3, 0.4);
+              addFloatingText(enemy.x, enemy.y - enemy.size, '無敵', '#38bdf8');
+              if (bullet.pierceRemaining < 0) {
+                bullet.y = -500; // force cleanup
+              }
+            } else {
+              enemy.hp -= bullet.damage;
+              bullet.pierceRemaining--;
 
-            // Particle impact sparks
-            addExplosion(bullet.x, bullet.y, enemy.color, 4, 0.6);
+              // Particle impact sparks
+              addExplosion(bullet.x, bullet.y, enemy.color, 4, 0.6);
 
-            // Floating individual damage numbers
-            addFloatingText(enemy.x, enemy.y - enemy.size, `${bullet.damage}`, '#ffffff');
+              // Floating individual damage numbers
+              addFloatingText(enemy.x, enemy.y - enemy.size, `${bullet.damage}`, '#ffffff');
 
-            // Force bullet deletion if out of pierce
-            if (bullet.pierceRemaining < 0) {
-              bullet.y = -500; // force cleanup
-            }
+              // Force bullet deletion if out of pierce
+              if (bullet.pierceRemaining < 0) {
+                bullet.y = -500; // force cleanup
+              }
 
-            // Check enemy defeat
-            if (enemy.hp <= 0 && enemy.hp + bullet.damage > 0) {
-              defeatEnemy(enemy);
+              // Check enemy defeat
+              if (enemy.hp <= 0 && enemy.hp + bullet.damage > 0) {
+                defeatEnemy(enemy);
+              }
             }
           }
         }
@@ -1507,6 +1554,14 @@ export default function GameCanvas({
         ctx.fill();
       }
 
+      if (e.isBoss && bossInvincibleTimer.current > 0) {
+        ctx.beginPath();
+        ctx.arc(0, 0, e.size + 15, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(56, 189, 248, ${0.4 + Math.sin(Date.now() / 120) * 0.25})`;
+        ctx.lineWidth = 3.5;
+        ctx.stroke();
+      }
+
       ctx.shadowBlur = 0;
 
       // Draw inside highlights
@@ -1521,19 +1576,20 @@ export default function GameCanvas({
       ctx.font = 'bold 12px "JetBrains Mono", monospace';
       ctx.textAlign = 'center';
       
-      // Calculate HP display text
-      const hpText = `${Math.ceil(e.hp)}`;
+      // Calculate HP display text or Invincible state
+      const isInvBoss = e.isBoss && bossInvincibleTimer.current > 0;
+      const hpText = isInvBoss ? `無敵: ${bossInvincibleTimer.current.toFixed(1)}s` : `${Math.ceil(e.hp)}`;
       const badgeW = ctx.measureText(hpText).width + 8;
       
       // Draw background tag
       ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
       ctx.fillRect(e.x - badgeW / 2, e.y - e.size - 18, badgeW, 14);
-      ctx.strokeStyle = e.color;
+      ctx.strokeStyle = isInvBoss ? '#38bdf8' : e.color;
       ctx.lineWidth = 0.5;
       ctx.strokeRect(e.x - badgeW / 2, e.y - e.size - 18, badgeW, 14);
 
       // Raw counts value text
-      ctx.fillStyle = '#ffffff';
+      ctx.fillStyle = isInvBoss ? '#38bdf8' : '#ffffff';
       ctx.fillText(hpText, e.x, e.y - e.size - 7);
     });
 
@@ -2157,74 +2213,125 @@ export default function GameCanvas({
 
       {/* 6. Boss Defeat Reward Selection Overlay Modal */}
       {showRewardModal && (
-        <div className="absolute inset-0 z-50 bg-[#020617]/90 backdrop-blur-md flex flex-col justify-center items-center p-6 text-center animate-fade-in pointer-events-auto">
-          <div className="w-full max-w-sm bg-slate-900 border border-slate-700/85 rounded-2xl p-5 shadow-2xl flex flex-col gap-4 relative">
+        <div className="absolute inset-0 z-50 bg-[#020617]/95 backdrop-blur-md flex flex-col justify-center items-center p-4 text-center animate-fade-in pointer-events-auto">
+          <div className="w-full max-w-sm bg-slate-900 border border-slate-700/85 rounded-2xl p-4.5 shadow-2xl flex flex-col gap-3.5 relative">
             <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-cyan-500 via-indigo-500 to-emerald-500 rounded-t-2xl" />
             
-            <div className="flex flex-col items-center gap-1.5 mt-2">
-              <Sparkles className="w-8 h-8 text-yellow-400 animate-pulse" />
-              <h3 className="text-md font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 via-amber-300 to-indigo-300 uppercase tracking-widest">
+            <div className="flex flex-col items-center gap-1 mt-1">
+              <Sparkles className="w-7 h-7 text-yellow-400 animate-pulse" />
+              <h3 className="text-sm font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 via-amber-300 to-indigo-300 uppercase tracking-widest leading-none">
                 BOSS DEFEATED!
               </h3>
-              <p className="text-xs text-indigo-405 font-bold tracking-wide">
+              <p className="text-[11px] text-indigo-300 font-bold tracking-wide mt-0.5">
                 ボス撃破報酬を【1つだけ】選んでください
               </p>
             </div>
 
-            <div className="flex flex-col gap-2.5 mt-1">
+            {/* 📊 現在のステータス表示 */}
+            <div className="bg-slate-950/80 p-2.5 rounded-xl border border-slate-800/80 text-left">
+              <div className="text-[9px] text-slate-500 uppercase tracking-wider font-bold mb-1 flex justify-between font-sans">
+                <span>📊 撃破時のステータス</span>
+                <span className="text-violet-400 font-mono">Stage {playerStats.stage}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[9px] font-mono leading-none">
+                <div className="flex justify-between border-b border-slate-900/60 pb-0.5">
+                  <span className="text-slate-400">❤️ HP:</span>
+                  <span className="text-emerald-400 font-bold">{Math.round(playerStats.hp)} / {playerStats.maxHp}</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-900/60 pb-0.5">
+                  <span className="text-slate-400 font-sans">🛡️ シールド:</span>
+                  <span className="text-cyan-400 font-bold">{Math.round(playerStats.shieldHp)} / {playerStats.maxShieldHp}</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-900/60 pb-0.5">
+                  <span className="text-slate-400">💥 攻撃力:</span>
+                  <span className="text-amber-400 font-bold">{playerStats.damage}</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-900/60 pb-0.5">
+                  <span className="text-slate-400">⚡ 連射速度:</span>
+                  <span className="text-cyan-400 font-bold">{playerStats.fireRate.toFixed(1)}/s</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">🌌 弾丸数:</span>
+                  <span className="text-indigo-400 font-bold">{playerStats.bulletCount}発</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">🎯 追尾弾:</span>
+                  <span className="text-violet-400 font-bold">{playerStats.homingCount}基</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 mt-0.5 max-h-[300px] overflow-y-auto pr-0.5">
               {/* Option 1: HP Increase */}
               <button
                 onClick={() => handleSelectReward('hp_increase')}
-                className="w-full p-3 bg-slate-950/80 hover:bg-emerald-950/40 border border-slate-800/80 hover:border-emerald-500 rounded-xl flex items-center justify-between text-left transition-all duration-300 group cursor-pointer active:scale-[0.98]"
+                className="w-full p-2 bg-slate-950/80 hover:bg-emerald-950/40 border border-slate-800/80 hover:border-emerald-500 rounded-xl flex items-center justify-between text-left transition-all duration-300 group cursor-pointer active:scale-[0.98]"
               >
-                <div className="flex items-center gap-3">
-                  <div className="p-2 bg-emerald-950/60 text-emerald-400 rounded-lg group-hover:scale-110 transition-transform flex items-center justify-center">
-                    <Heart className="w-4 h-4 fill-emerald-500/10" />
+                <div className="flex items-center gap-2 max-w-[90%]">
+                  <div className="p-1.5 bg-emerald-950/60 text-emerald-400 rounded-lg group-hover:scale-105 transition-transform flex items-center justify-center flex-shrink-0">
+                    <Heart className="w-3.5 h-3.5 fill-emerald-500/10" />
                   </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-white group-hover:text-emerald-300 transition-colors">HP増加（10から50増える）</h4>
-                    <p className="text-[10px] text-slate-400 mt-0.5 font-sans">最大HPおよび現在HPが【＋10〜50】上昇</p>
+                  <div className="min-w-0">
+                    <h4 className="text-[11px] font-bold text-white group-hover:text-emerald-300 transition-colors leading-tight">HP上限拡張</h4>
+                    <p className="text-[9px] text-slate-400 mt-0.5 leading-none font-sans overflow-hidden text-ellipsis whitespace-nowrap">最大HP及び現在HPが【＋10〜50】上昇</p>
                   </div>
                 </div>
-                <ChevronRight className="w-4 h-4 text-slate-600 group-hover:text-emerald-400 transition-colors" />
+                <ChevronRight className="w-3.5 h-3.5 text-slate-600 group-hover:text-emerald-400 transition-colors flex-shrink-0" />
               </button>
 
-              {/* Option 2: Shield Restore */}
+              {/* Option 2: HP Heal 50% */}
+              <button
+                onClick={() => handleSelectReward('hp_heal_50')}
+                className="w-full p-2 bg-slate-950/80 hover:bg-emerald-950/40 border border-slate-800/80 hover:border-emerald-500 rounded-xl flex items-center justify-between text-left transition-all duration-300 group cursor-pointer active:scale-[0.98]"
+              >
+                <div className="flex items-center gap-2 max-w-[90%]">
+                  <div className="p-1.5 bg-emerald-950/60 text-emerald-400 rounded-lg group-hover:scale-105 transition-transform flex items-center justify-center flex-shrink-0">
+                    <Heart className="w-3.5 h-3.5 text-emerald-400 fill-emerald-400/20 animate-pulse" />
+                  </div>
+                  <div className="min-w-0">
+                    <h4 className="text-[11px] font-bold text-white group-hover:text-emerald-300 transition-colors leading-tight font-sans">現在のHPの50%回復</h4>
+                    <p className="text-[9px] text-slate-400 mt-0.5 leading-none font-sans overflow-hidden text-ellipsis whitespace-nowrap">現在のHPを最大HPの50%分回復（最大HP上限）</p>
+                  </div>
+                </div>
+                <ChevronRight className="w-3.5 h-3.5 text-slate-600 group-hover:text-emerald-400 transition-colors flex-shrink-0" />
+              </button>
+
+              {/* Option 3: Shield Restore */}
               <button
                 onClick={() => handleSelectReward('shield')}
-                className="w-full p-3 bg-slate-950/80 hover:bg-cyan-950/40 border border-slate-800/80 hover:border-cyan-500 rounded-xl flex items-center justify-between text-left transition-all duration-300 group cursor-pointer active:scale-[0.98]"
+                className="w-full p-2 bg-slate-950/80 hover:bg-cyan-950/40 border border-slate-800/80 hover:border-cyan-500 rounded-xl flex items-center justify-between text-left transition-all duration-300 group cursor-pointer active:scale-[0.98]"
               >
-                <div className="flex items-center gap-3">
-                  <div className="p-2 bg-cyan-950/60 text-cyan-400 rounded-lg group-hover:scale-110 transition-transform">
-                    <Shield className="w-4 h-4 fill-cyan-500/10" />
+                <div className="flex items-center gap-2 max-w-[90%]">
+                  <div className="p-1.5 bg-cyan-950/60 text-cyan-400 rounded-lg group-hover:scale-105 transition-transform flex-shrink-0">
+                    <Shield className="w-3.5 h-3.5 fill-cyan-500/10" />
                   </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-white group-hover:text-cyan-300 transition-colors font-sans">シールドを全回復</h4>
-                    <p className="text-[10px] text-slate-400 mt-0.5">ポータブルバリアセルを最大値まで再チャージ</p>
+                  <div className="min-w-0">
+                    <h4 className="text-[11px] font-bold text-white group-hover:text-cyan-300 transition-colors leading-tight font-sans">シールドを全回復</h4>
+                    <p className="text-[9px] text-slate-400 mt-0.5 leading-none font-sans overflow-hidden text-ellipsis whitespace-nowrap">ポータブルバリアセルを最大値まで再チャージ</p>
                   </div>
                 </div>
-                <ChevronRight className="w-4 h-4 text-slate-600 group-hover:text-cyan-400 transition-colors" />
+                <ChevronRight className="w-3.5 h-3.5 text-slate-600 group-hover:text-cyan-400 transition-colors flex-shrink-0" />
               </button>
 
-              {/* Option 3: Damage Upgrade */}
+              {/* Option 4: Damage Upgrade */}
               <button
                 onClick={() => handleSelectReward('damage')}
-                className="w-full p-3 bg-slate-950/80 hover:bg-amber-950/40 border border-slate-800/80 hover:border-amber-500 rounded-xl flex items-center justify-between text-left transition-all duration-300 group cursor-pointer active:scale-[0.98]"
+                className="w-full p-2 bg-slate-950/80 hover:bg-amber-950/40 border border-slate-800/80 hover:border-amber-500 rounded-xl flex items-center justify-between text-left transition-all duration-300 group cursor-pointer active:scale-[0.98]"
               >
-                <div className="flex items-center gap-3">
-                  <div className="p-2 bg-amber-950/60 text-amber-500 rounded-lg group-hover:scale-110 transition-transform">
-                    <Zap className="w-4 h-4 fill-amber-500/10" />
+                <div className="flex items-center gap-2 max-w-[90%]">
+                  <div className="p-1.5 bg-amber-950/60 text-amber-500 rounded-lg group-hover:scale-105 transition-transform flex-shrink-0">
+                    <Zap className="w-3.5 h-3.5 fill-amber-500/10" />
                   </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-white group-hover:text-amber-300 transition-colors">弾のダメージ増加</h4>
-                    <p className="text-[10px] text-slate-400 mt-0.5">主砲弾エネルギーを【＋10〜30】臨界上昇</p>
+                  <div className="min-w-0">
+                    <h4 className="text-[11px] font-bold text-white group-hover:text-amber-300 transition-colors leading-tight">弾のダメージ増加</h4>
+                    <p className="text-[9px] text-slate-400 mt-0.5 leading-none font-sans overflow-hidden text-ellipsis whitespace-nowrap">主砲弾エネルギーを【＋10〜30】臨界上昇</p>
                   </div>
                 </div>
-                <ChevronRight className="w-4 h-4 text-slate-600 group-hover:text-amber-400 transition-colors" />
+                <ChevronRight className="w-3.5 h-3.5 text-slate-600 group-hover:text-amber-400 transition-colors flex-shrink-0" />
               </button>
             </div>
 
-            <div className="text-[10px] text-slate-500 mt-1 font-mono tracking-wide">
+            <div className="text-[9px] text-slate-500 mt-0.5 font-mono tracking-wide leading-none">
               ※ 次ステージ (Stage {playerStats.stage + 1}) へ進みます。
             </div>
           </div>

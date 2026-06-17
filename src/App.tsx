@@ -303,7 +303,7 @@ export default function App() {
                 </li>
                 <li className="flex gap-2">
                   <span className="text-indigo-400 font-black">▶</span>
-                  <span><strong>ボスと宝箱の秘宝</strong>: Wave末期に降臨する極悪ボスを撃破すると、<strong>超強力な「宝箱」</strong>が出現！獲得すると<strong>自動迎撃NPCドローン</strong>が召喚され、無限に進行度が進みます。</span>
+                  <span><strong>ボスと宝箱の秘宝</strong>: Wave末期に降臨する極悪ボスを撃破すると、<strong>超強力な「宝箱」</strong>が出現！宝箱を獲得後、新たなステージに進めます。</span>
                 </li>
                 <li className="flex gap-2">
                   <span className="text-indigo-400 font-black">▶</span>
